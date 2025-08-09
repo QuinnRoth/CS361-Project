@@ -2,8 +2,10 @@ import pygame
 import pygame_menu
 import webbrowser
 from my_theme import mytheme
-from pygame_menu.themes import Theme
-from time import sleep
+import zmq
+import time
+import subprocess
+
 
 class Game:
     def __init__(self):
@@ -13,6 +15,7 @@ class Game:
         self.display = pygame.Surface((self.DISPLAY_W, self.DISPLAY_H))
         self.window = pygame.display.set_mode((self.DISPLAY_W, self.DISPLAY_H))
         self.rulebookOpen = False
+        self.warningOpen = False
         font = pygame.font.Font('Munro-2LYe.ttf', 36)
         self.link_rect = None
         self.link_url = None
@@ -22,6 +25,9 @@ class Game:
         self.close_rect = None
         self.difficulty = 1
         self.playmenu = None
+        self.cancel_rect = None
+        self.okay_rect = None
+        self.subprocesses = []
         # create a text surface object,
         # on which text is drawn on it.
         self.text1 = font.render('Log In To See', True, (255, 255, 255))
@@ -51,6 +57,24 @@ class Game:
         self.create_playmenu()
         self.create_mainmenu()
 
+    def run_subprocesses(self):
+        """Starts the game's subprocesses and stores their handles."""
+        if self.subprocesses:  # Avoid starting duplicate processes
+            return
+
+        venv_path = r"C:\Users\qtrot\PycharmProjects\battleshipTest\.venv\Scripts\python.exe"
+        self.subprocesses.append(subprocess.Popen([venv_path, "game_logic.py"]))
+        time.sleep(0.2)
+        self.subprocesses.append(subprocess.Popen([venv_path, "render_board.py"]))
+        time.sleep(0.2)
+        self.subprocesses.append(subprocess.Popen([venv_path, "opponent.py"]))
+
+    def cleanup_subprocesses(self):
+        """Terminates all running subprocesses."""
+        for process in self.subprocesses:
+            process.terminate()
+        self.subprocesses = []
+
     def create_mainmenu(self):
         self.mainmenu = pygame_menu.Menu('BattleShip', 1200, 800, theme=mytheme)
         self.mainmenu.add.button('Play', self.start_the_game)
@@ -62,6 +86,209 @@ class Game:
 
 
         print("playing")
+
+    def play_game(self):
+
+        setup_done = {
+            "player": False,
+            "AI": False
+        }
+
+        current_turn = None  # "player" or "AI"
+
+        context = zmq.Context()
+
+        # Sends to: Board Render
+        to_board = context.socket(zmq.PUSH)
+        to_board.bind("tcp://*:5556")
+
+        # Receives from: Board Render + AI Opponent
+        from_clients = context.socket(zmq.PULL)
+        from_clients.bind("tcp://*:5555")
+
+        # REQ socket to AI Opponent for turn-based moves
+        to_ai = context.socket(zmq.REQ)
+        to_ai.connect("tcp://localhost:5557")  # changed from bind to connect
+        to_ai.RCVTIMEO = 5000
+
+        # REQ socket to Game Logic (renamed to_logic)
+        to_logic = context.socket(zmq.REQ)
+        to_logic.connect("tcp://localhost:5560")  # changed port from 5558 to 5560
+        to_logic.RCVTIMEO = 5000  # 5 seconds timeout
+
+        # Remove PUSH/PULL to game logic
+        # ...removed: to_game PUSH and from_game PULL...
+
+        time.sleep(1)
+
+        self.run_subprocesses()
+
+        time.sleep(1)
+
+        def handle_ai_turn(ai_socket):
+            print("Requesting AI move...")
+            try:
+                ai_socket.send_json({"type": "your_turn"})
+                ai_move = ai_socket.recv_json()  # Block and wait for response
+                print(f"AI fires at ({ai_move['row']}, {ai_move['col']})")
+                # Send fire request to logic and wait for result
+                to_logic.send_json(ai_move)
+                result = to_logic.recv_json()  # BLOCKING: wait for reply
+                print("Received result from game logic:", result)
+                return ai_socket, result
+            except zmq.error.Again:
+                print("AI didn't respond in time, recreating socket...")
+                ai_socket.close()
+                new_socket = context.socket(zmq.REQ)
+                new_socket.connect("tcp://localhost:5557")  # always connect to AI opponent
+                new_socket.RCVTIMEO = 5000
+                # Retry once
+                new_socket.send_json({"type": "your_turn"})
+                ai_move = new_socket.recv_json()
+                print(f"AI fires at ({ai_move['row']}, {ai_move['col']}) (game)")
+                to_logic.send_json(ai_move)
+                result = to_logic.recv_json()
+                print("Received result from game logic:", result)
+                return new_socket, result
+
+        ai_ready = False
+        while not ai_ready:
+            msg = from_clients.recv_json()
+            if msg.get("type") == "ready" and msg.get("player") == "AI":
+                print("AI opponent is ready (game from AI).")
+                ai_ready = True
+            else:
+                # This is likely a placement message, handle it, so it's not lost
+                player = msg.get("player")
+                if player:  # Only process if player is specified
+                    print(f"Received ship placement from {player} while waiting for AI. (Game) ships: {msg['ships']}")
+                    # Send placement to logic and wait for ack
+                    to_logic.send_json({
+                        "type": "placement",
+                        "ships": msg["ships"],
+                        "player": player
+                    })
+                    to_logic.recv_json()  # BLOCKING: wait for ack
+                    time.sleep(0.1)
+                    setup_done[player] = True
+
+        while self.playing:
+            result = None  # Always initialize result
+            # 1. Handle player/AI actions
+            try:
+                msg = from_clients.recv_json()
+                msg_type = msg.get("type")
+                print("Received message (game) from client:", msg)
+                # Ship placement
+                if msg_type == "setup" or msg_type == "placement":
+                    player = msg.get("player", "player")  # default to player UI
+                    print(f"Received ship placement (game) from {player}")
+                    # Send placement to logic and wait for ack
+                    to_logic.send_json({
+                        "type": "placement",
+                        "ships": msg["ships"],
+                        "player": player
+                    })
+                    to_logic.recv_json()  # BLOCKING: wait for ack
+                    setup_done[player] = True
+
+                    time.sleep(1)
+
+                    # If both are ready, start game
+                    if all(setup_done.values()):
+                        current_turn = "player"
+                        print("Both players ready. Player's turn starts.")
+
+                # Fire command
+                elif msg_type == "fire":
+                    player = msg.get("player", "player")
+                    if current_turn == player:
+                        print(f"{player} fires at ({msg['row']}, {msg['col']}) (game)")
+                        # Send fire to logic and wait for result
+                        to_logic.send_json(msg)
+                        result = to_logic.recv_json()  # BLOCKING: wait for reply
+                        # Handle result below
+                    else:
+                        print(f"Ignoring {player}'s move. Not their turn.")
+                        result = None
+                else:
+                    result = None
+
+            except zmq.Again:
+                result = None
+
+            # 2. Handle result from Game Logic (if any)
+            if result:
+                print("Received result from game logic:", result)
+                to_board.send_json({
+                    "type": "update",
+                    "row": result["row"],
+                    "col": result["col"],
+                    "result": result["result"],
+                    "player": result["player"],
+                })
+                time.sleep(0.1)  # Give time for the board to update
+                if result.get("game_over"):
+                    print(f"Game over! Winner: {result['winner']}")
+                    to_board.send_json({
+                        "type": "game_over",
+                        "winner": result["winner"]
+                    })
+                    time.sleep(2)
+                    self.cleanup_subprocesses()
+                    self.playing = False
+                    break
+
+                # Switch turn
+                if result["result"] in ["hit", "sunk"]:  # if shot hit, get another turn
+                    print(f"{current_turn} gets another turn.")
+                    if current_turn == "AI":  # Request AI to make a move
+                        to_ai, result = handle_ai_turn(to_ai)
+                        # Send update to board
+                        to_board.send_json({
+                            "type": "update",
+                            "row": result["row"],
+                            "col": result["col"],
+                            "result": result["result"],
+                            "player": result["player"],
+                        })
+                        if result.get("game_over"):
+                            print(f"Game over! Winner: {result['winner']}")
+                            to_board.send_json({
+                                "type": "game_over",
+                                "winner": result["winner"]
+                            })
+                            time.sleep(2)
+                            self.cleanup_subprocesses()
+                            self.playing = False
+                            break
+                else:
+                    if current_turn == "player":
+                        current_turn = "AI"
+                        print("Now it's AI's turn.")
+                        to_ai, result = handle_ai_turn(to_ai)
+                        # Send update to board
+                        to_board.send_json({
+                            "type": "update",
+                            "row": result["row"],
+                            "col": result["col"],
+                            "result": result["result"],
+                            "player": result["player"],
+                        })
+                        current_turn = "player"
+                        print("Now it's player's turn.")
+                        if result.get("game_over"):
+                            print(f"Game over! Winner: {result['winner']}")
+                            to_board.send_json({
+                                "type": "game_over",
+                                "winner": result["winner"]
+                            })
+                            time.sleep(2)
+                            self.cleanup_subprocesses()
+                            self.playing = False
+                            break
+                        time.sleep(0.05)
+            time.sleep(0.01)
 
     def open_rulebook(self):
         self.rulebookOpen = True
@@ -125,6 +352,48 @@ class Game:
                 self.window.blit(rulebook_text_surface, rulebook_text_rect)
 
             self.check_events()
+
+            if self.warningOpen:
+                browser_warning = pygame.Surface((500, 200))
+                browser_warning.fill((255, 255, 255))
+                warning_font = pygame.font.Font('Munro-2LYe.ttf', 18)
+                warning_text = warning_font.render(
+                    "This will open in a browser are you sure you want to continue?", True, (0, 0, 0))
+                warning_rect = warning_text.get_rect(center=(600, 400))
+                self.window.blit(browser_warning, (350, 300))
+                self.window.blit(warning_text, warning_rect)
+
+                cancel_font = pygame.font.Font('Munro-2LYe.ttf', 20)
+                cancel_text = "Cancel"
+
+                cancel_surface = cancel_font.render(cancel_text, True, (255, 255, 255))
+                cancel_button = pygame.Surface((45, 45))
+                cancel_button.fill((200, 0, 0))
+
+                cancel_text_rect = cancel_surface.get_rect(center=(25, 20))
+                cancel_button.blit(cancel_surface, cancel_text_rect)
+
+                self.cancel_rect = cancel_button.get_rect()
+                self.cancel_rect.center = (450, 500)
+
+                okay_font = pygame.font.Font('Munro-2LYe.ttf', 20)
+                okay_text = "Okay"
+
+                okay_surface = okay_font.render(okay_text, True, (255, 255, 255))
+                okay_button = pygame.Surface((45, 45))
+                okay_button.fill((0, 200, 0))
+
+                okay_text_rect = okay_surface.get_rect(center=(22, 22))
+                okay_button.blit(okay_surface, okay_text_rect)
+
+                self.okay_rect = okay_button.get_rect()
+                self.okay_rect.center = (750, 500)
+
+                self.window.blit(cancel_button, self.cancel_rect)
+                self.window.blit(okay_button, self.okay_rect)
+
+
+
             pygame.display.flip()
 
     def send_quit_event(self):
@@ -138,10 +407,9 @@ class Game:
 
     def create_playmenu(self):
         self.playmenu = pygame_menu.Menu('BattleShip', 1200, 800, theme=mytheme)
-        self.playmenu.add.button('Start Game', self.start_the_game)
+        self.playmenu.add.button('Start Game', self.play_game)
         self.playmenu.add.selector('Difficulty', [('Easy', 1), ('Medium', 2), ('Hard', 3)], onchange=self.change_difficulty)
         self.playmenu.add.button('Back', self.close_playmenu)
-
 
     def draw_main_background(self):
         self.window.fill((84, 150, 255))
@@ -183,7 +451,13 @@ class Game:
                 if event.key == pygame.K_ESCAPE:
                     self.rulebookOpen = False
             elif event.type == pygame.MOUSEBUTTONDOWN and self.rulebookOpen:
-                if self.link_rect and self.link_rect.collidepoint(event.pos):
-                    webbrowser.open(self.link_url)
+                if self.warningOpen:
+                    if self.cancel_rect and self.cancel_rect.collidepoint(event.pos):
+                        self.warningOpen = False
+                    elif self.okay_rect and self.okay_rect.collidepoint(event.pos):
+                        self.warningOpen = False
+                        webbrowser.open(self.link_url)
+                elif self.link_rect and self.link_rect.collidepoint(event.pos):
+                    self.warningOpen = True
                 elif hasattr(self, 'close_rect') and self.close_rect.collidepoint(event.pos):
                     self.rulebookOpen = False
