@@ -20,11 +20,12 @@ GRAY = (100, 100, 100)
 BLUE = (100, 100, 255)
 
 placing_ships = True
-current_ship_size = 3
-ships_to_place = [3, 3, 2, 2]
+current_ship_size = 4
+ships_to_place = [4, 3, 3, 2, 2]
 placed_ships = []
 ship_orientation = "horizontal"
 hover_tile = None
+turn_message = ""
 
 pygame.init()
 screen = pygame.display.set_mode((WIDTH, HEIGHT + 50))
@@ -97,6 +98,11 @@ def draw_game_over():
         txt = font.render(msg, True, (255, 255, 0))
         screen.blit(txt, (10, HEIGHT + 10))
 
+def draw_turn_message(message):
+    if not game_over:
+        text = font.render(message, True, (255, 255, 255))
+        screen.blit(text, (10, HEIGHT + 10))
+
 
 def get_enemy_clicked_cell(mx, my):
     board_x = GRID_SIZE * TILE_SIZE + BOARD_SPACING
@@ -130,6 +136,9 @@ while running:
     draw_grid(enemy_board, GRID_SIZE * TILE_SIZE + BOARD_SPACING, MARGIN, show_ships=False)
     draw_game_over()
 
+    if not placing_ships and not game_over:
+        draw_turn_message(turn_message)
+
     if placing_ships:
         txt = font.render(
             f"Placing ship size {current_ship_size} ({ship_orientation}) - Press R to rotate",
@@ -155,9 +164,16 @@ while running:
 
             if target == "AI":
                 player_board[r][c] = result if result in ["hit", "miss", "sunk"] else player_board[r][c]
+                if result == "sunk":
+                    for r, c in msg["sunk_ship"]:
+                        player_board[r][c] = "sunk"
+                turn_message = "AI's turn to fire" if result in ["hit", "sunk"] else "Your turn to fire"
             else:
                 enemy_board[r][c] = result if result in ["hit", "miss", "sunk"] else enemy_board[r][c]
-
+                turn_message = "You hit AI's ship! You go again" if result in ["hit", "sunk"] else "AI's turn to fire"
+                if result == "sunk":
+                    for r, c in msg["sunk_ship"]:
+                        enemy_board[r][c] = "sunk"
         elif msg["type"] == "game_over":
             game_over = True
             winner = msg["winner"]

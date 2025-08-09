@@ -73,6 +73,10 @@ def fire_at(player, row, col):
                     sunk = True
                     players[target]["sunk"] += 1
                     fire_result = "sunk"
+                    sunk_ship = ship
+                    # Mark all cells of the sunk ship as "sunk"
+                    for r, c in ship:
+                        board[r][c] = "sunk"
                     break
 
         if players[target]["sunk"] == len(ships):
@@ -92,7 +96,8 @@ def fire_at(player, row, col):
         "result": fire_result,
         "sunk": sunk,
         "game_over": game_over,
-        "winner": player if game_over else None
+        "winner": player if game_over else None,
+        "sunk_ship": sunk_ship if sunk is True else None
     }
 
 

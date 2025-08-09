@@ -58,7 +58,7 @@ class Game:
         self.create_mainmenu()
 
     def run_subprocesses(self):
-        """Starts the game's subprocesses and stores their handles."""
+        # Starts the game's subprocesses and stores their handles.
         if self.subprocesses:  # Avoid starting duplicate processes
             return
 
@@ -67,10 +67,15 @@ class Game:
         time.sleep(0.2)
         self.subprocesses.append(subprocess.Popen([venv_path, "render_board.py"]))
         time.sleep(0.2)
-        self.subprocesses.append(subprocess.Popen([venv_path, "opponent.py"]))
+        if self.difficulty == 1:
+            self.subprocesses.append(subprocess.Popen([venv_path, "opponent.py"]))
+        elif self.difficulty == 2:
+            self.subprocesses.append(subprocess.Popen([venv_path, "opponent2.py"]))
+        elif self.difficulty == 3:
+            self.subprocesses.append(subprocess.Popen([venv_path, "opponent3.py"]))
 
     def cleanup_subprocesses(self):
-        """Terminates all running subprocesses."""
+        # Terminates all running subprocesses.
         for process in self.subprocesses:
             process.terminate()
         self.subprocesses = []
@@ -125,16 +130,43 @@ class Game:
 
         time.sleep(1)
 
-        def handle_ai_turn(ai_socket):
+        def handle_ai_turn(ai_socket, result):
             print("Requesting AI move...")
+
             try:
-                ai_socket.send_json({"type": "your_turn"})
+                ai_socket.send_json({"type": "your_turn", "result": result})
                 ai_move = ai_socket.recv_json()  # Block and wait for response
                 print(f"AI fires at ({ai_move['row']}, {ai_move['col']})")
                 # Send fire request to logic and wait for result
                 to_logic.send_json(ai_move)
                 result = to_logic.recv_json()  # BLOCKING: wait for reply
-                print("Received result from game logic:", result)
+                print("Received result from game logic 1:", result)
+
+                # Send update to board
+                to_board.send_json({
+                    "type": "update",
+                    "row": result["row"],
+                    "col": result["col"],
+                    "result": result["result"],
+                    "player": result["player"],
+                    "sunk_ship": result.get("sunk_ship", None)
+                })
+                if result.get("game_over"):
+                    print(f"Game over! Winner: {result['winner']}")
+                    to_board.send_json({
+                        "type": "game_over",
+                        "winner": result["winner"]
+                    })
+                    time.sleep(2)
+                    self.cleanup_subprocesses()
+                    self.playing = False
+                    return ai_socket, result
+
+                if result["result"] in ["hit", "sunk"]:
+                    print(f"AI gets another turn.")
+                    ai_socket, result = handle_ai_turn(ai_socket, result)
+
+
                 return ai_socket, result
             except zmq.error.Again:
                 print("AI didn't respond in time, recreating socket...")
@@ -143,12 +175,22 @@ class Game:
                 new_socket.connect("tcp://localhost:5557")  # always connect to AI opponent
                 new_socket.RCVTIMEO = 5000
                 # Retry once
-                new_socket.send_json({"type": "your_turn"})
+                new_socket.send_json({"type": "your_turn", "result": result})
                 ai_move = new_socket.recv_json()
                 print(f"AI fires at ({ai_move['row']}, {ai_move['col']}) (game)")
                 to_logic.send_json(ai_move)
                 result = to_logic.recv_json()
-                print("Received result from game logic:", result)
+                print("Received result from game logic 2:", result)
+
+                # Send update to board
+                to_board.send_json({
+                    "type": "update",
+                    "row": result["row"],
+                    "col": result["col"],
+                    "result": result["result"],
+                    "player": result["player"],
+                    "sunk_ship": result.get("sunk_ship", None)
+                })
                 return new_socket, result
 
         ai_ready = False
@@ -219,13 +261,14 @@ class Game:
 
             # 2. Handle result from Game Logic (if any)
             if result:
-                print("Received result from game logic:", result)
+                print("Received result from game logic 3:", result)
                 to_board.send_json({
                     "type": "update",
                     "row": result["row"],
                     "col": result["col"],
                     "result": result["result"],
                     "player": result["player"],
+                    "sunk_ship": result.get("sunk_ship", None)
                 })
                 time.sleep(0.1)  # Give time for the board to update
                 if result.get("game_over"):
@@ -243,15 +286,8 @@ class Game:
                 if result["result"] in ["hit", "sunk"]:  # if shot hit, get another turn
                     print(f"{current_turn} gets another turn.")
                     if current_turn == "AI":  # Request AI to make a move
-                        to_ai, result = handle_ai_turn(to_ai)
-                        # Send update to board
-                        to_board.send_json({
-                            "type": "update",
-                            "row": result["row"],
-                            "col": result["col"],
-                            "result": result["result"],
-                            "player": result["player"],
-                        })
+                        to_ai, result = handle_ai_turn(to_ai, result)
+
                         if result.get("game_over"):
                             print(f"Game over! Winner: {result['winner']}")
                             to_board.send_json({
@@ -262,21 +298,14 @@ class Game:
                             self.cleanup_subprocesses()
                             self.playing = False
                             break
-                else:
+                    else:
+                        continue
+                if result["result"] == "miss":
                     if current_turn == "player":
                         current_turn = "AI"
                         print("Now it's AI's turn.")
-                        to_ai, result = handle_ai_turn(to_ai)
-                        # Send update to board
-                        to_board.send_json({
-                            "type": "update",
-                            "row": result["row"],
-                            "col": result["col"],
-                            "result": result["result"],
-                            "player": result["player"],
-                        })
-                        current_turn = "player"
-                        print("Now it's player's turn.")
+                        to_ai, result = handle_ai_turn(to_ai, None)
+
                         if result.get("game_over"):
                             print(f"Game over! Winner: {result['winner']}")
                             to_board.send_json({
@@ -287,7 +316,10 @@ class Game:
                             self.cleanup_subprocesses()
                             self.playing = False
                             break
-                        time.sleep(0.05)
+                    if current_turn == "AI":
+                        print("Now it's player's turn.")
+                        current_turn = "player"
+                    time.sleep(0.05)
             time.sleep(0.01)
 
     def open_rulebook(self):
@@ -400,6 +432,7 @@ class Game:
         pygame.event.post(pygame.event.Event(pygame.QUIT))
 
     def change_difficulty(self, value, difficulty):
+        print(f"Difficulty changed to: {difficulty}")
         self.difficulty = difficulty
 
     def close_playmenu(self):

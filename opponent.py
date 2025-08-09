@@ -18,7 +18,7 @@ time.sleep(1)
 # Place ships automatically
 ships = []
 used = set()
-lengths = [3, 3, 2, 2]
+lengths = [4, 3, 3, 2, 2]
 
 for length in lengths:
     placed = False
