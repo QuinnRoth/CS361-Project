@@ -1,5 +1,5 @@
 import time
-
+import signal
 import pygame
 import zmq
 import sys
@@ -48,6 +48,20 @@ player_board = [["empty"] * GRID_SIZE for _ in range(GRID_SIZE)]
 enemy_board = [["unknown"] * GRID_SIZE for _ in range(GRID_SIZE)]
 game_over = False
 winner = None
+
+def signal_handler(sig, frame):
+    print("Game logic service shutting down...")
+    if 'sender' in globals():
+        sender.close()
+    if 'receiver' in globals():
+        receiver.close()
+    if 'context' in globals():
+        context.term()
+    sys.exit(0)
+
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
+
 
 
 def draw_grid(board, offset_x, offset_y, show_ships):

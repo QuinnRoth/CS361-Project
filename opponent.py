@@ -1,6 +1,8 @@
 import zmq
 import random
 import time
+import signal
+import sys
 
 GRID_SIZE = 10
 context = zmq.Context()
@@ -19,6 +21,20 @@ time.sleep(1)
 ships = []
 used = set()
 lengths = [4, 3, 3, 2, 2]
+
+def signal_handler(sig, frame):
+    print("Game logic service shutting down...")
+    if 'setup_sender' in globals():
+        setup_sender.close()
+    if 'move_socket' in globals():
+        move_socket.close()
+    if 'context' in globals():
+        context.term()
+    sys.exit(0)
+
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
+
 
 for length in lengths:
     placed = False

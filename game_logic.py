@@ -1,11 +1,26 @@
 import zmq
 import time
+import signal
+import sys
 
 GRID_SIZE = 10
 
 context = zmq.Context()
 to_game = context.socket(zmq.REP)
 to_game.bind("tcp://*:5560")  # changed port from 5558 to 5560
+
+def signal_handler(sig, frame):
+    print("Game logic service shutting down...")
+    if 'to_game' in globals():
+        to_game.close()
+    if 'context' in globals():
+        context.term()
+    sys.exit(0)
+
+
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
+
 
 time.sleep(0.2)
 

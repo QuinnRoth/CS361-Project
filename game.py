@@ -5,6 +5,7 @@ from my_theme import mytheme
 import zmq
 import time
 import subprocess
+import requests  # <-- Add this for HTTP requests
 
 
 class Game:
@@ -22,6 +23,10 @@ class Game:
         self.rulebook = None
         self.rulebookScreen = None
         self.mainmenu = None
+        self.logged_in = False
+
+        self.username = None
+        self.user_stats = {"wins": 0, "losses": 0, "games_played": 0}
         self.close_rect = None
         self.difficulty = 1
         self.playmenu = None
@@ -31,8 +36,8 @@ class Game:
         # create a text surface object,
         # on which text is drawn on it.
         self.text1 = font.render('Log In To See', True, (255, 255, 255))
-        self.text2 = font.render('Where You Place On The', True, (255, 255, 255))
-        self.text3 = font.render('Leaderboard!', True, (255, 255, 255))
+        self.text2 = font.render('your match', True, (255, 255, 255))
+        self.text3 = font.render('data!', True, (255, 255, 255))
 
         self.r_text1 = pygame.transform.rotate(self.text1, -35)
         self.r_text2 = pygame.transform.rotate(self.text2, -35)
@@ -56,6 +61,7 @@ class Game:
 
         self.create_playmenu()
         self.create_mainmenu()
+
 
     def run_subprocesses(self):
         # Starts the game's subprocesses and stores their handles.
@@ -84,7 +90,43 @@ class Game:
         self.mainmenu = pygame_menu.Menu('BattleShip', 1200, 800, theme=mytheme)
         self.mainmenu.add.button('Play', self.start_the_game)
         self.mainmenu.add.button('Rules', self.open_rulebook)
+        # Add Login/Register/Profile logic
+        if not self.logged_in:
+            self.mainmenu.add.button('Login', self.open_login_menu)
+            self.mainmenu.add.button('Register', self.open_register_menu)
+        else:
+            self.mainmenu.add.button('Profile', self.show_profile)
+            self.mainmenu.add.button('Logout', self.logout)
         self.mainmenu.add.button('Quit', self.send_quit_event)
+
+    def send_user_stats(self, result):
+        if self.logged_in:
+            # Update stats locally
+            if result["winner"] == "player":
+                self.user_stats["wins"] += 1
+                self.user_stats["games_played"] += 1
+            else:
+                self.user_stats["losses"] += 1
+                self.user_stats["games_played"] += 1
+
+            # Update stats on the server
+            print(f"Updating stats for {self.username}...")
+            if result["winner"] == "player":
+                response = requests.post(
+                    'http://localhost:5000/update_stats',
+                    json={
+                        'username': self.username,
+                        'result': 'win'})
+            else:
+                response = requests.post(
+                    'http://localhost:5000/update_stats',
+                    json={
+                        'username': self.username,
+                        'result': 'loss'})
+            if response.status_code == 200:
+                print("Stats updated successfully.")
+            else:
+                print("Failed to update stats:", response.json().get('error', 'Unknown error'))
 
     def start_the_game(self):
         self.playing = True
@@ -193,6 +235,17 @@ class Game:
                 })
                 return new_socket, result
 
+        def socket_cleanup():
+            print("Cleaning up sockets...")
+            if 'to_board' in locals():
+                to_board.close()
+            if 'from_clients' in locals():
+                from_clients.close()
+            if 'to_ai' in locals():
+                to_ai.close()
+            if 'to_logic' in locals():
+                to_logic.close()
+
         ai_ready = False
         while not ai_ready:
             msg = from_clients.recv_json()
@@ -273,12 +326,15 @@ class Game:
                 time.sleep(0.1)  # Give time for the board to update
                 if result.get("game_over"):
                     print(f"Game over! Winner: {result['winner']}")
+                    self.send_user_stats(result)
                     to_board.send_json({
                         "type": "game_over",
                         "winner": result["winner"]
                     })
                     time.sleep(2)
+                    socket_cleanup()
                     self.cleanup_subprocesses()
+                    context.term()
                     self.playing = False
                     break
 
@@ -290,12 +346,15 @@ class Game:
 
                         if result.get("game_over"):
                             print(f"Game over! Winner: {result['winner']}")
+                            self.send_user_stats(result)
                             to_board.send_json({
                                 "type": "game_over",
                                 "winner": result["winner"]
                             })
                             time.sleep(2)
+                            socket_cleanup()
                             self.cleanup_subprocesses()
+                            context.term()
                             self.playing = False
                             break
                     else:
@@ -308,12 +367,15 @@ class Game:
 
                         if result.get("game_over"):
                             print(f"Game over! Winner: {result['winner']}")
+                            self.send_user_stats(result)
                             to_board.send_json({
                                 "type": "game_over",
                                 "winner": result["winner"]
                             })
                             time.sleep(2)
+                            socket_cleanup()
                             self.cleanup_subprocesses()
+                            context.term()
                             self.playing = False
                             break
                     if current_turn == "AI":
@@ -448,6 +510,10 @@ class Game:
         self.window.fill((84, 150, 255))
         self.window.blit(self.bg_img1, (700, 300))
         self.window.blit(self.bg_img3, (0, 200))
+        if not self.logged_in:
+            self.window.blit(self.r_text1, self.textRect1)
+            self.window.blit(self.r_text2, self.textRect2)
+            self.window.blit(self.r_text3, self.textRect3)
         self.window.blit(self.r_text1, self.textRect1)
         self.window.blit(self.r_text2, self.textRect2)
         self.window.blit(self.r_text3, self.textRect3)
@@ -459,7 +525,6 @@ class Game:
 
     def game_loop(self):
         while self.running:
-
             events = pygame.event.get()
             for event in events:
                 if event.type == pygame.QUIT:
@@ -494,3 +559,92 @@ class Game:
                     self.warningOpen = True
                 elif hasattr(self, 'close_rect') and self.close_rect.collidepoint(event.pos):
                     self.rulebookOpen = False
+
+    def open_login_menu(self):
+        login_menu = pygame_menu.Menu('Login', 600, 400, theme=mytheme)
+        username = login_menu.add.text_input('Username: ')
+        password = login_menu.add.text_input('Password: ', password=True)
+        message = login_menu.add.label('', font_size=20)
+
+        def attempt_login():
+            u = username.get_value()
+            p = password.get_value()
+            try:
+                resp = requests.post('http://localhost:5000/login', json={'username': u, 'password': p}, timeout=3)
+                if resp.status_code == 200:
+                    self.logged_in = True
+                    self.username = u
+                    self.fetch_user_stats()
+                    self.create_mainmenu()
+                    login_menu.disable()
+                else:
+                    message.set_title(resp.json().get('error', 'Login failed.'))
+            except Exception as e:
+                message.set_title('Server error.')
+
+        def return_to_main():
+            login_menu.disable()
+            self.create_mainmenu()
+
+        login_menu.add.button('Submit', attempt_login)
+        login_menu.add.button('Back', return_to_main)
+        login_menu.mainloop(self.window)
+
+    def open_register_menu(self):
+        register_menu = pygame_menu.Menu('Register', 600, 400, theme=mytheme)
+        username = register_menu.add.text_input('Username: ')
+        password = register_menu.add.text_input('Password: ', password=True)
+        message = register_menu.add.label('', font_size=20)
+
+        def attempt_register():
+            u = username.get_value()
+            p = password.get_value()
+            try:
+                resp = requests.post('http://localhost:5000/register', json={'username': u, 'password': p}, timeout=3)
+                if resp.status_code == 201:
+                    message.set_title('Registration successful! Please login.')
+                else:
+                    message.set_title(resp.json().get('error', 'Registration failed.'))
+            except Exception as e:
+                message.set_title('Server error.')
+
+        def return_to_main():
+            register_menu.disable()
+            self.create_mainmenu()
+
+        register_menu.add.button('Submit', attempt_register)
+        register_menu.add.button('Back', return_to_main)
+        register_menu.mainloop(self.window)
+
+    def fetch_user_stats(self):
+        response = requests.get(f'http://localhost:5000/get_stats?username={self.username}', timeout=3)
+        if response.status_code == 200:
+            self.user_stats = response.json()
+        else:
+            self.user_stats = {"wins": 0, "losses": 0, "games_played": 0}
+            print("Failed to fetch user stats:", response.json().get('error', 'Could not fetch stats'))
+
+
+    def logout(self):
+        self.logged_in = False
+        self.username = None
+        self.user_stats = {"wins": 0, "losses": 0, "games_played": 0}
+        self.create_mainmenu()
+
+    def show_profile(self):
+        profile_menu = pygame_menu.Menu('Profile', 600, 400, theme=mytheme)
+
+        self.fetch_user_stats()
+
+
+        profile_menu.add.label(f'User: {self.username}', font_size=30)
+        profile_menu.add.label(f'Wins: {self.user_stats["wins"]}', font_size=25)
+        profile_menu.add.label(f'Losses: {self.user_stats["losses"]}', font_size=25)
+        profile_menu.add.label(f'Games Played: {self.user_stats["games_played"]}', font_size=25)
+
+        def return_to_main():
+            profile_menu.disable()
+            self.create_mainmenu()
+
+        profile_menu.add.button('Back', return_to_main)
+        profile_menu.mainloop(self.window)
